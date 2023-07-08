@@ -1,0 +1,1 @@
+Data downloaded from https://api.worldbank.org/v2/en/indicator/SI.POV.GINI?downloadformat=csv

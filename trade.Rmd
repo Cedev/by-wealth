@@ -1,0 +1,369 @@
+---
+title: "R Notebook"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+```{r}
+source('mix.R')
+source('population.R')
+source('trade.R')
+source('plot_utils.R')
+```
+
+### Trade Categories
+
+```{r}
+trade_categories <- read.csv(
+  'data/hs2_categories.csv', 
+  colClasses = c('character', 'character', 'character'))
+trade_categories
+```
+
+```{r}
+trade_sections <- read.csv(
+  'data/hs2_sections.csv', 
+  colClasses = c('character', 'character', 'character'))
+trade_sections
+```
+
+```{r}
+trade_countries <- countries |>
+  inner_join(exports, join_by(iso_3digit_alpha == iso_3digit_alpha)) |>
+  inner_join(imports, join_by(iso_3digit_alpha == iso_3digit_alpha), suffix=c(".exports", ".imports")) |>
+  arrange(iso_3digit_alpha)
+trade_countries
+```
+
+```{r}
+
+m <- log(trade_countries$gdp_per_capita)
+s <- 2*erf.inv(trade_countries$gini)
+w <- trade_countries$population/sum(trade_countries$population)
+
+world <- mix(mapply(distr::Norm, m, s), w)
+```
+
+
+```{r}
+trade_per_capita <- data.frame(
+  trade_countries$iso_3digit_alpha,
+  p=world@p(m),
+  gdp_per_capita=trade_countries$gdp_per_capita,
+  exports_per_capita=trade_countries$value.exports/trade_countries$population,
+  imports_per_capita=trade_countries$value.imports/trade_countries$population,
+  balance_per_capita=(trade_countries$value.exports -trade_countries$value.imports) /trade_countries$population
+)
+trade_per_capita
+```
+
+
+```{r}
+per_capita_limits = range(trade_per_capita$gdp_per_capita, trade_per_capita$exports_per_capita, trade_per_capita$imports_per_capita)
+
+ggplot(trade_per_capita, aes(x=gdp_per_capita, y=exports_per_capita)) +
+  geom_point() +
+  coord_fixed(xlim=per_capita_limits, ylim=per_capita_limits) +
+  scale_x_log10(labels = scales::dollar) + 
+  scale_y_log10(labels = scales::dollar) +
+  labs(title="Exports per capita, 2021", x="GDP per capita", y="Exports per capita")
+```
+
+
+```{r}
+ggplot(trade_per_capita, aes(x=gdp_per_capita, y=imports_per_capita)) +
+  geom_point() +
+  coord_fixed(xlim=per_capita_limits, ylim=per_capita_limits) +
+  scale_x_log10(labels = scales::dollar) + 
+  scale_y_log10(labels = scales::dollar) + 
+  labs(title="Imports per capita, 2021", x="GDP per capita", y="Imports per capita")
+```
+
+```{r}
+ggplot(trade_per_capita, aes(x=gdp_per_capita, y=balance_per_capita)) +
+  geom_point() +
+  scale_x_log10(labels = scales::dollar)
+```
+
+```{r}
+trade_summary |>
+  group_by(hs2) |>
+  arrange(value) |>
+  summarize(value=sum(value)) |>
+  ggplot(aes(x=hs2, y=value)) +
+  geom_col()
+```
+
+```{r}
+trade_summary |>
+  inner_join(trade_categories, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  group_by(category) |>
+  arrange(value) |>
+  summarize(value=sum(value)) |>
+  ggplot(aes(x=category, y=value)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)) +
+  # scale_x_discrete(labels = function(x) str_wrap(x, width = 3)) +
+  scale_y_continuous(labels = scales::dollar)
+```
+
+
+```{r}
+trade_summary |>
+  inner_join(trade_sections, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  group_by(section) |>
+  arrange(value) |>
+  summarize(value=sum(value)) |>
+  ggplot(aes(x=section, y=value)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)) +
+  # scale_x_discrete(labels = function(x) str_wrap(x, width = 3)) +
+  scale_y_continuous(labels = scales::dollar)
+```
+
+```{r}
+export_matrix <- trade_summary |>
+  inner_join(trade_countries, join_by(exporter == iso_3digit_alpha)) |>
+  inner_join(trade_sections, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  pivot_matrix(row_name=section, col_name=exporter, values_from=value) |>
+  scale1()
+```
+
+```{r, fig.width=12}
+resolution <- 1024
+
+ds <- world@quantile_bins(resolution)
+
+exports_by_p <- export_matrix %*% ds
+
+reshape2::melt(exports_by_p) |>
+  mutate(p=(Var2-0.5)/resolution) |>
+  select(section=Var1, p, value) |>
+  ggplot(aes(x=p, y=value, fill=section)) + 
+  geom_bar(stat="identity", width=1/resolution) +
+  labs(title="Exports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of exports", x = "mixed GDP/capita quantile",
+       fill="Harmonized System Section")
+```
+
+
+
+
+```{r}
+export_matrix_cat <- trade_summary |>
+  inner_join(trade_countries, join_by(exporter == iso_3digit_alpha)) |>
+  inner_join(trade_categories, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  pivot_matrix(row_name=category, col_name=exporter, values_from=value) |>
+  scale1()
+colnames(export_matrix_cat) == trade_countries$iso_3digit_alpha
+```
+
+
+```{r}
+
+exports_by_p_cat <- export_matrix_cat %*% ds
+
+literal_data_frame <- function(...) {
+  l <- list(...)
+  l1 <- l[[1]]
+  lt <- list_transpose(l, template = 1:length(l1))
+  names(lt) <- names(l1)
+  return(do.call(data.frame, lt))
+}
+  
+cat_scales <- literal_data_frame(
+  list(category='Art', fill='gold', color='white', linewidth=10),
+  list('Instruments', 'lightyellow', 'white', 1),
+  list('Vehicles','#FF7788','white',1),
+  list('Electrical and Electronics', '#66DDFF','white',1),
+  list('Machinery', '#66AAEE', 'white', 1),
+  list('Manufactured', '#AA44DD', 'white', 1),
+  list("Medicines", '#DD44AA', 'white', 1),
+  list("Chemicals", '#DD44AA', 'black', 0.2),
+  list("Clothes", "pink", 'white', 1),
+  list("Fabric", "pink", 'black', 1),
+  list("Foodstuffs", "lightgreen", 'white', 1),
+  list("Animals", "lightgreen", 'black', 0.2),
+  list("Vegetables", "lightgreen", 'black', 0.2),
+  list("Fish", "lightgreen", 'black', 0.2),
+  list("Paper", "#BB9955", 'white', 1),
+  list("Wood", "#BB9955", 'black', 0.2),
+  list("Metals", "grey", 'white', 1),
+  list("Precious Stones and Metals", "grey", 'black', 0.2),
+  list("Minerals", "grey", 'black', 0.2),
+  list("Polymers", "orange", 'white', 1),
+  list("Fuel and Energy", "orange", 'black', 0.2)
+)
+
+
+cat_scales <- literal_data_frame(
+  list(category='Art', fill='gold', color='white', linewidth=1, linetype='blank'),
+  list('Instruments', '#D0C000', 'white', 1, linetype='blank'),
+  list('Vehicles', '#BB0000','white',1, linetype='blank'),
+  list('Electrical and Electronics', '#007090','white',1, linetype='blank'),
+  list('Machinery', 'blue', 'white', 1, linetype='blank'),
+  list('Manufactured', 'purple', 'white', 1, linetype='blank'),
+  list("Medicines", '#AA0077', 'white', 1, linetype='blank'),
+  list("Chemicals", '#AA0077', '#550033', 0.2, linetype='solid'),
+  list("Clothes", "#E04040", 'white', 1, linetype='blank'),
+  list("Fabric", "#E04040", '#802020', 1, linetype='solid'),
+  list("Foodstuffs", "#008000", 'white', 1, linetype='blank'),
+  list("Animals", "#008000", '#004000', 0.2, linetype='solid'),
+  list("Vegetables", "#008000", '#004000', 0.2, linetype='solid'),
+  list("Fish", "#008000", '#004000', 0.2, linetype='solid'),
+  list("Paper", "#664411", 'white', 1, linetype='blank'),
+  list("Wood", "#664411", '#221100', 0.2, linetype='solid'),
+  list("Metals", "#555555", 'white', 1, linetype='blank'),
+  list("Precious Stones and Metals", "#555555", '#333333', 0.2, linetype='solid'),
+  list("Minerals", "#555555", '#333333', 0.2, linetype='solid'),
+  list("Polymers", "#CC5500", 'white', 1, linetype='blank'),
+  list("Fuel and Energy", "#CC5500", '#663300', 0.2, linetype='solid')
+)
+
+major_color <- 'white'
+
+major_lt <- 'solid'
+minor_lt <- 'solid'
+  
+major_lw <- 0.75
+minor_lw <- 0.75
+
+cat_scales <- literal_data_frame(
+  list(category='Art', fill='gold', color=major_color, linewidth=0, linetype='blank'),
+  list('Instruments', '#D0C000', major_color, major_lw, major_lt),
+  list('Vehicles', '#BB0000',major_color, major_lw, major_lt),
+  list('Electrical and Electronics', '#007090',major_color, major_lw, major_lt),
+  list('Machinery', 'blue', major_color, major_lw, major_lt),
+  list('Manufactured', 'purple', major_color, major_lw, major_lt),
+  list("Medicines", '#AA0077', major_color, major_lw, major_lt),
+  list("Chemicals", '#AA0077', '#550033', minor_lw, minor_lt),
+  list("Clothes", "#E04040", major_color, major_lw, major_lt),
+  list("Fabric", "#E04040", '#802020', minor_lw, minor_lt),
+  list("Foodstuffs", "#008000", major_color, major_lw, major_lt),
+  list("Animals", "#008000", '#004000', minor_lw, minor_lt),
+  list("Vegetables", "#008000", '#004000',minor_lw, minor_lt),
+  list("Fish", "#008000", '#004000', minor_lw, minor_lt),
+  list("Paper", "#664411", major_color, major_lw, major_lt),
+  list("Wood", "#664411", '#221100', minor_lw, minor_lt),
+  list("Metals", "#555555", major_color, major_lw, major_lt),
+  list("Precious Stones and Metals", "#555555", '#333333', minor_lw, minor_lt),
+  list("Minerals", "#555555", '#333333', minor_lw, minor_lt),
+  list("Polymers", "#CC5500", major_color,major_lw, major_lt),
+  list("Fuel and Energy", "#CC5500", '#663300', minor_lw, minor_lt)
+)
+
+
+```
+
+```{r, fig.width=12}
+
+exports_by_p_cat_df <- reshape2::melt(exports_by_p_cat) |>
+  mutate(p=(Var2-1)/(resolution-1)) |>
+  select(category=Var1, p, value)
+
+exports_by_p_cat_df$category <- factor(exports_by_p_cat_df$category , levels=cat_scales$category)
+
+
+ggplot(exports_by_p_cat_df, aes(x=p, y=value, fill=category, color=category, linewidth=category, linetype=category)) + 
+  geom_area(key_glyph = draw_key_area) +
+  scale_fill_manual(values=cat_scales$fill) +
+  scale_color_manual(values=cat_scales$color) +
+  scale_linetype_manual(values=cat_scales$linetype) +
+  scale_linewidth_manual(values=cat_scales$linewidth) +
+  guides(fill=guide_legend(ncol=1)) +
+  labs(title="Exports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of exports", x = "mixed GDP/capita quantile")
+```
+
+```{r}
+ggplot(exports_by_p_cat_df, aes(x=p, y=value, fill=category)) + 
+  geom_area() +
+  geom_line(position="stack", aes(color=category, linetype=category)) +
+  scale_fill_manual(values=cat_scales$fill) +
+  scale_color_manual(values=cat_scales$color) +
+  scale_linetype_manual(values=cat_scales$linetype) +
+  labs(title="Exports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of exports", x = "mixed GDP/capita quantile") 
+```
+
+
+```{r, fig.width=12}
+
+ggplot(exports_by_p_cat_df, aes(x=p, y=value, fill=category)) + 
+  geom_bar(stat="identity", width=1/resolution) +
+  scale_fill_manual(values=cat_scales$fill)
+  labs(title="Exports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of exports", x = "mixed GDP/capita quantile",
+       fill="Category")
+```
+
+```{r}
+import_matrix_cat <- trade_summary |>
+  inner_join(trade_countries, join_by(importer == iso_3digit_alpha)) |>
+  inner_join(trade_categories, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  pivot_matrix(row_name=category, col_name=importer, values_from=value) |>
+  scale1()
+colnames(import_matrix_cat) == trade_countries$iso_3digit_alpha
+```
+```{r, fig.width=12}
+
+imports_by_p_cat <- import_matrix_cat %*% ds
+
+imports_by_p_cat_df <- reshape2::melt(imports_by_p_cat) |>
+  mutate(p=(Var2-1)/(resolution-1)) |>
+  select(category=Var1, p, value)
+
+imports_by_p_cat_df$category <- factor(imports_by_p_cat_df$category , levels=cat_scales$category)
+
+ggplot(imports_by_p_cat_df, aes(x=p, y=value, fill=category)) + 
+  geom_area(aes(color=category), linewidth=0.02) +
+  scale_fill_manual(values=cat_scales$fill) +
+  scale_color_manual(values=cat_scales$color, guide='none') +
+  scale_linewidth_manual(values=cat_scales$linewidth, guide='none') +
+  labs(title="Imports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of imports", x = "mixed GDP/capita quantile",
+       fill="Category")
+```
+
+```{r}
+import_matrix <- trade_summary |>
+  inner_join(trade_countries, join_by(importer == iso_3digit_alpha)) |>
+  inner_join(trade_sections, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+  pivot_matrix(row_name=section, col_name=importer, values_from=value) |>
+  scale1()
+import_matrix
+```
+
+
+```{r, fig.width=12}
+imports_by_p <- import_matrix %*% ds
+
+reshape2::melt(imports_by_p) |>
+  mutate(p=(Var2-0.5)/resolution) |>
+  select(section=Var1, p, value) |>
+  ggplot(aes(x=p, y=value, fill=section)) + 
+  geom_bar(stat="identity", width=1/resolution) +
+  labs(title="Imports distribution by GDP/capita",
+       subtitle="mixing countries by log-normal GDP/capita, income inequality, and population",
+       y = "portion of imports", x = "mixed GDP/capita quantile",
+       fill="Harmonized System Section")
+```
+
+
+```{r}
+trade_pivotted <- trade_summary |>
+  inner_join(trade_sections, join_by(hs2 >= start.hs2, hs2 <= end.hs2)) |>
+    group_by(exporter, section) |>
+    arrange(value) |>
+    summarize(value=sum(value)) |>
+    pivot_wider(names_from=exporter, values_from=value, values_fill = 0)
+trade_matrix <- trade_pivotted[,-1]
+as.vector(trade_pivotted[,1])[[1]]
+#rownames(trade_matrix) <- trade_pivotted[,1]
+```

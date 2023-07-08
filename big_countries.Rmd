@@ -1,0 +1,172 @@
+---
+title: "Big Countries"
+output: html_notebook
+---
+
+## Country categorization
+
+```{r}
+library(tidyverse)
+source('mix.R')
+source('population.R')
+source('plot_utils.R')
+```
+
+### EU countries
+```{r}
+eu_countries <- read.csv('data/eu_countries.csv')
+
+eu <- countries |>
+  inner_join(eu_countries, join_by(iso_3digit_alpha == iso_3digit_alpha)) |>
+  mutate(big_category = 'EU')
+eu
+```
+
+### Big countries
+
+Twelve biggest countries not in the EU
+
+```{r}
+big <- countries |>
+  anti_join(eu_countries, join_by(iso_3digit_alpha == iso_3digit_alpha)) |>
+  slice_max(population, n=12) |>
+  mutate(big_category=iso_3digit_alpha)
+big
+```
+
+### World
+
+World population
+
+```{r}
+world_pop <- sum(countries$population)
+world_pop
+```
+
+Categorize countries as either a big country themselves, part of the EU, or part of the world.
+
+```{r}
+categorized <- countries |>
+  left_join(union(big, eu) |> select(iso_3digit_alpha, big_category), join_by(iso_3digit_alpha == iso_3digit_alpha)) |>
+  arrange(gdp_per_capita) |>
+  mutate(
+    gdp = gdp_per_capita * population,
+    big_category = coalesce(big_category, 'World'),
+    p = (cumsum(as.numeric(population)) - population/2)/world_pop
+  )
+```
+
+Sort categories by their average GDP/capita
+
+```{r}
+category_order <- categorized |>
+  mutate(
+    big_name = ifelse(big_category == iso_3digit_alpha, name, big_category)
+  ) |>
+  group_by(big_category, big_name) |>
+  summarise(
+    gdp=sum(gdp),
+    population=sum(population)
+  ) |>
+  mutate(
+    gdp_per_capita = gdp/population,
+    ) |>
+  arrange(-gdp_per_capita)
+category_order
+```
+
+Put categories in that order for plots by creating a factor in that order
+
+```{r}
+categorized$big_category <- factor(categorized$big_category, levels=category_order$big_category )
+```
+
+## Mixture of countries
+
+Mix countries together with
+
+* a mean of their log gdp/capita
+* a standard deviation of a log-normal distribution with gini coefficient equal to the country's income inequality gini coefficient
+* weight proportional to their population
+
+```{r}
+m <- log(categorized$gdp_per_capita)
+s <- 2*erf.inv(categorized$gini)
+w <- categorized$population/sum(categorized$population)
+
+world <- mix(mapply(Norm, m, s), w)
+```
+
+This distributes the population of each country among world population based on GDP inequality between countries and income inequality within countries.
+
+```{r, fig.width=12}
+resolution <- 1024
+
+ds <- world@quantile_bins(resolution)
+df <- reshape2::melt(t(ds)) |>
+  mutate(
+    p = (Var1-0.5)/resolution,
+    big_category = categorized[Var2,'big_category'])
+
+ggplot(df, aes(x=p, y=value, fill=big_category)) + 
+  geom_bar(stat="identity", width=1/resolution) +
+  scale_fill_manual(values = rev(c("#b98d32", "#115740", "#1B7339", "#FF9933", "#815f4b", "#ff8080", "#76a442", "#CCCCCC", "#ab8179", "#dcacb1", "#EE1C25", "#001489", "#BC002D", "#d9d2d6")),
+    labels = category_order$big_name
+  ) +
+  labs(
+    title = "World population by national GDP/capita, 2021",
+    subtitle = "mixing countries by log-normal GDP/capita, income inequality, and population",
+    y = "portion of population", x = "mixed GDP/capita quantile",
+    fill="Country")
+```
+
+The area of the graph is the population of the world. Mostly China 🇨🇳 in red and India 🇮🇳 in orange.
+
+The population is sorted by national GDP/capita increasing from left to right across the graph, with the GDP for each country blurred by that nation's income inequality.
+
+In the other direction the 12 biggest countries and the EU are sorted bottom to top by increasing GDP/capita, with groups for the EU and all of the rest of the world.
+
+## GDP/capita regression
+
+Estimate GDP/capita based on the mixture of countries as the weighted geometric mean of each country GDP/capita.
+
+```{r}
+log_gdp_regression <- t(m) %*% ds
+df <- reshape2::melt(t(log_gdp_regression)) |>
+  mutate(
+    p = (Var1-0.5)/resolution,
+    gdp_per_capita = exp(value)) |>
+  select(p, log_gdp_per_capita=value, gdp_per_capita)
+
+gdp_by_quantile <- data.frame(
+  categorized$iso_3digit_alpha,
+  p=world@p(m),
+  log_y=m,
+  log_y_hat=t(m %*% scale1(world@d(m))),
+  gdp_per_capita=categorized$gdp_per_capita
+)
+gdp_by_quantile
+```
+
+
+```{r}
+r2 <- r_squared(gdp_by_quantile$log_y_hat, gdp_by_quantile$log_y)
+
+ggplot() + 
+  geom_line(data=df, aes(x=p, y=gdp_per_capita, color="Estimated")) +
+  geom_point(data=gdp_by_quantile, aes(x=p, y=gdp_per_capita, color="Countries"), shape=3, size=0.75) + 
+  scale_y_log10(labels = scales::dollar) +
+  geom_text( aes(x=0, y=max(gdp_by_quantile$gdp_per_capita), hjust=0, vjust=1), label = r2_label(r2), parse = TRUE, show.legend = FALSE) +
+  scale_color_manual(
+    name = NULL,
+    values = c("black", "#3399DD"),
+    guide = guide_legend(override.aes = list(
+      linetype = c(0, 1),
+      shape = c(3, NA)
+    ))
+  ) + 
+  labs(title = "Estimated GDP per capita", subtitle="mixing countries by log-normal GDP/capita, income inequality, and population", y="GDP per capita", x="mixed GDP/capita quantile")
+
+```
+
+
